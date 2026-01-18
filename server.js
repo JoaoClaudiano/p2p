@@ -9,6 +9,7 @@ const wss = new WebSocket.Server({ server });
 // Armazena salas de chat: { roomCode: [clients...] }
 const rooms = new Map();
 
+
 wss.on('connection', (ws, req) => {
     const parameters = url.parse(req.url, true).query;
     const roomCode = parameters.room || 'default-room';
