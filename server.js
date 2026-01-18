@@ -1,81 +1,103 @@
-// server.js - Servidor de Sinalização WebSocket
+// server.js - Servidor de Sinalização WebSocket (CORRIGIDO)
 const WebSocket = require('ws');
 const http = require('http');
-const url = require('url');
 
 const server = http.createServer();
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ server, clientTracking: true });
 
-// Armazena salas de chat: { roomCode: [clients...] }
+// Armazena salas: { roomCode: Set{ws1, ws2} }
 const rooms = new Map();
 
-
 wss.on('connection', (ws, req) => {
-    const parameters = url.parse(req.url, true).query;
-    const roomCode = parameters.room || 'default-room';
-    const clientId = Date.now() + Math.random().toString(36).substr(2, 9);
-    
-    console.log(`Novo cliente ${clientId} conectado à sala: ${roomCode}`);
-    
-    // Adiciona cliente à sala
-    if (!rooms.has(roomCode)) rooms.set(roomCode, new Set());
-    rooms.get(roomCode).add(ws);
-    
-    // Atualiza contagem de usuários para todos na sala
-    broadcastToRoom(roomCode, { type: 'user-count', count: rooms.get(roomCode).size }, ws);
-    
+    console.log('🔌 Novo cliente conectado. URL:', req.url);
+
+    // Extrai o parâmetro 'room' da URL (ex: ws://localhost:8080?room=sos)
+    const urlParams = new URL(req.url, `http://${req.headers.host}`);
+    const roomCode = urlParams.searchParams.get('room') || 'sala-padrao';
+    const clientId = `user_${Date.now()}`;
+
+    console.log(`   -> Cliente ${clientId} entrou na sala: "${roomCode}"`);
+
+    // 1. Adiciona o cliente à sala
+    if (!rooms.has(roomCode)) {
+        rooms.set(roomCode, new Set());
+    }
+    const room = rooms.get(roomCode);
+    room.add(ws);
+    ws.roomCode = roomCode;
+
+    // 2. Envia confirmação de entrada APENAS para o novo cliente
+    ws.send(JSON.stringify({
+        type: 'welcome',
+        yourId: clientId,
+        room: roomCode,
+        userCount: room.size
+    }));
+
+    // 3. Informa a TODOS na sala (incluindo o novo) a nova contagem
+    broadcastToRoom(roomCode, {
+        type: 'user-count',
+        count: room.size
+    });
+
+    // 4. Escuta mensagens deste cliente
     ws.on('message', (message) => {
         try {
             const signal = JSON.parse(message);
-            signal.senderId = clientId;
-            
-            // Retransmite o sinal para todos os outros na mesma sala
-            broadcastToRoom(roomCode, signal, ws);
+            console.log(`📩 [${roomCode}] Sinal recebido: ${signal.type}`);
+
+            // Repassa o sinal para TODOS OS OUTROS na mesma sala
+            broadcastToRoom(roomCode, signal, ws); // 'ws' é o remetente original
+
         } catch (err) {
             console.error('Erro ao processar mensagem:', err);
         }
     });
-    
+
+    // 5. Lida com a desconexão
     ws.on('close', () => {
-        // Remove cliente da sala
+        console.log(`❌ Cliente ${clientId} desconectado da sala "${roomCode}"`);
         if (rooms.has(roomCode)) {
-            rooms.get(roomCode).delete(ws);
-            if (rooms.get(roomCode).size === 0) {
+            const room = rooms.get(roomCode);
+            room.delete(ws);
+            if (room.size === 0) {
+                console.log(`   -> Sala "${roomCode}" está vazia, removendo.`);
                 rooms.delete(roomCode);
             } else {
-                broadcastToRoom(roomCode, { type: 'user-count', count: rooms.get(roomCode).size }, ws);
+                // Atualiza a contagem para os que ficaram
+                broadcastToRoom(roomCode, {
+                    type: 'user-count',
+                    count: room.size
+                });
             }
         }
-        console.log(`Cliente ${clientId} desconectado da sala: ${roomCode}`);
+    });
+
+    ws.on('error', (err) => {
+        console.error(`Erro no WebSocket (${clientId}):`, err);
     });
 });
 
 function broadcastToRoom(roomCode, message, excludeWs = null) {
     if (!rooms.has(roomCode)) return;
-    
+    const room = rooms.get(roomCode);
     const messageStr = JSON.stringify(message);
-    for (const client of rooms.get(roomCode)) {
+    room.forEach(client => {
+        // Envia para todos, exceto para quem deve ser excluído (o remetente original)
         if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
             client.send(messageStr);
         }
-    }
+    });
 }
 
-// Instruções para o Host
-console.log(`
-=== SERVIDOR DE SINALIZAÇÃO PARA REDE SOS ===
-1. Este servidor ajuda dispositivos na mesma rede a se conectarem.
-2. Para ser um HOST:
-   a. Compartilhe seu Wi-Fi ou crie um hotspot no seu celular/PC.
-   b. Todos devem conectar-se na MESMA rede Wi-Fi.
-   c. Anote o IP do HOST (seu IP nesta rede). No Windows: ipconfig, no Mac/Linux: ifconfig.
-   d. Os "convidados" usarão esse IP no aplicativo web.
-
-3. Inicie o servidor com: node server.js
-4. O servidor rodará em: http://SEU_IP_LOCAL:8080
-`);
-
 server.listen(8080, '0.0.0.0', () => {
-    console.log('Servidor de sinalização rodando na porta 8080');
-    console.log('Acesse o aplicativo web em outro dispositivo usando: http://SEU_IP_LOCAL:8080');
+    console.log('=== 🚀 SERVIDOR DE SINALIZAÇÃO INICIADO ===');
+    console.log('📡 Ouvindo em:');
+    console.log('   - Local:  ws://localhost:8080');
+    console.log('   - Rede:   ws://SEU_IP_LOCAL:8080');
+    console.log('\n📋 INSTRUÇÕES PARA O HOST:');
+    console.log('1. Descubra seu IP local (no terminal: ipconfig / ifconfig)');
+    console.log('2. Compartilhe esse IP e a porta 8080 com os outros');
+    console.log('3. Os outros acessam seu IP no navegador (HTTP, não HTTPS!)');
+    console.log('============================================\n');
 });
