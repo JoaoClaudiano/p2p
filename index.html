@@ -160,70 +160,143 @@
         }
 
         // ========== MODO REDE LOCAL (WebRTC) ==========
-        async function initNetworkMode(hostIP, roomCode) {
-            updateStatus(`Conectando à sala: ${roomCode}...`, "info");
-            showSystemMessage(`Modo Rede Local. Conectando ao host: ${hostIP}`);
-            
-            // Configuração WebRTC
-            const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-            localPeerConnection = new RTCPeerConnection(config);
-            
-            // Cria canal de dados para trocar mensagens de texto
-            dataChannel = localPeerConnection.createDataChannel('chat');
-            setupDataChannel(dataChannel);
-            
-            // Lida com candidatos ICE (para encontrar caminho de conexão)
-            localPeerConnection.onicecandidate = ({ candidate }) => {
-                if (candidate && websocket.readyState === WebSocket.OPEN) {
-                    websocket.send(JSON.stringify({ type: 'ice-candidate', candidate, room: roomCode }));
-                }
-            };
-            
-            // Lida com dados recebidos de outro par
-            localPeerConnection.ondatachannel = (e) => {
-                const channel = e.channel;
-                setupDataChannel(channel);
-            };
-            
-            // Conecta ao servidor de sinalização do Host (WebSocket)
-            websocket = new WebSocket(`ws://${hostIP}:8080`);
-            websocket.onopen = () => {
-                websocket.send(JSON.stringify({ type: 'join', room: roomCode }));
-                updateStatus(`Conectado à sala "${roomCode}". Aguardando pares...`, "success");
-            };
-            
-            websocket.onmessage = async (e) => {
-                const signal = JSON.parse(e.data);
-                if (signal.type === 'offer') {
-                    // Recebe uma oferta de conexão de outro par
-                    await localPeerConnection.setRemoteDescription(new RTCSessionDescription(signal.offer));
-                    const answer = await localPeerConnection.createAnswer();
-                    await localPeerConnection.setLocalDescription(answer);
-                    websocket.send(JSON.stringify({ type: 'answer', answer, room: roomCode }));
-                } else if (signal.type === 'answer') {
-                    // Recebe uma resposta à nossa oferta
-                    await localPeerConnection.setRemoteDescription(new RTCSessionDescription(signal.answer));
-                } else if (signal.type === 'ice-candidate') {
-                    // Adiciona candidato ICE para estabelecer conexão
-                    try {
-                        await localPeerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
-                    } catch (err) { /* Ignora erros em candidatos duplicados */ }
-                } else if (signal.type === 'user-count') {
-                    updateStatus(`Usuários na sala: ${signal.count}`, "info");
-                }
-            };
-            
-            // Se criarmos a oferta (seremos o "iniciador" na sala)
-            setTimeout(() => {
-                if (localPeerConnection.signalingState === 'stable') {
-                    initiateWebRTCConnection(roomCode);
-                }
-            }, 1000);
-            
-            msgInput.disabled = false;
-            sendButton.disabled = false;
-            sendButton.onclick = sendMessageNetwork;
+ // SUBSTITUA a função initNetworkMode antiga por esta:
+async function initNetworkMode(hostIP, roomCode) {
+    updateStatus(`Conectando à sala "${roomCode}" no host ${hostIP}...`, "info");
+    showSystemMessage(`🔗 Modo Rede Local. Conectando...`);
+
+    // 1. Cria a conexão WebRTC
+    const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    localPeerConnection = new RTCPeerConnection(config);
+
+    // 2. Cria o canal de dados
+    dataChannel = localPeerConnection.createDataChannel('sos-chat');
+    setupDataChannel(dataChannel);
+
+    // 3. Configura WebRTC
+    localPeerConnection.onicecandidate = ({ candidate }) => {
+        if (candidate && websocket && websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({ 
+                type: 'ice-candidate', 
+                candidate, 
+                room: roomCode 
+            }));
         }
+    };
+
+    localPeerConnection.ondatachannel = (e) => {
+        console.log('📞 Canal de dados recebido de outro par!');
+        const channel = e.channel;
+        setupDataChannel(channel);
+    };
+
+    // 4. Conecta ao servidor de sinalização (WebSocket) - CORREÇÃO AQUI
+    return new Promise((resolve) => {
+        websocket = new WebSocket(`ws://${hostIP}:8080?room=${encodeURIComponent(roomCode)}`);
+
+        websocket.onopen = () => {
+            console.log('✅ WebSocket conectado!');
+            updateStatus(`Conectado à sala "${roomCode}". Aguardando pares...`, "success");
+            // Agora que está aberto, podemos enviar mensagens com segurança
+            resolve();
+        };
+
+        websocket.onmessage = async (e) => {
+            try {
+                const signal = JSON.parse(e.data);
+                console.log('Sinal recebido:', signal.type);
+
+                if (signal.type === 'welcome') {
+                    showSystemMessage(`Você entrou na sala "${signal.room}" (ID: ${signal.yourId}). ${signal.userCount} usuário(s) online.`);
+                }
+                else if (signal.type === 'user-count') {
+                    updateStatus(`👥 ${signal.count} usuário(s) na sala`, "info");
+                }
+                else if (signal.type === 'offer') {
+                    await handleOffer(signal, roomCode);
+                }
+                else if (signal.type === 'answer') {
+                    await localPeerConnection.setRemoteDescription(
+                        new RTCSessionDescription(signal.answer)
+                    );
+                }
+                else if (signal.type === 'ice-candidate' && signal.candidate) {
+                    try {
+                        await localPeerConnection.addIceCandidate(
+                            new RTCIceCandidate(signal.candidate)
+                        );
+                    } catch (err) { /* Ignora erros de candidatos duplicados */ }
+                }
+            } catch (err) {
+                console.error('Erro ao processar mensagem WebSocket:', err);
+            }
+        };
+
+        websocket.onerror = (err) => {
+            console.error('WebSocket error:', err);
+            updateStatus(`Erro de conexão com o host. Verifique o IP e se o servidor está rodando.`, "error");
+            showSystemMessage(`❌ Falha ao conectar no host: ${hostIP}:8080`);
+        };
+
+        websocket.onclose = () => {
+            console.log('WebSocket fechado');
+            updateStatus("Conexão com a sala fechada.", "warning");
+        };
+    }).then(() => {
+        // 5. Só depois do WebSocket aberto, tenta iniciar uma conexão WebRTC
+        // (Isso pode ser ajustado para ser iniciado por um botão "Oferecer Conexão")
+        setTimeout(() => initiateWebRTCConnection(roomCode), 500);
+        
+        // 6. Habilita a interface de chat
+        msgInput.disabled = false;
+        sendButton.disabled = false;
+        sendButton.onclick = sendMessageNetwork;
+        msgInput.focus();
+    });
+}
+
+// FUNÇÃO AUXILIAR para lidar com ofertas de conexão
+async function handleOffer(signal, roomCode) {
+    await localPeerConnection.setRemoteDescription(
+        new RTCSessionDescription(signal.offer)
+    );
+    const answer = await localPeerConnection.createAnswer();
+    await localPeerConnection.setLocalDescription(answer);
+    
+    // Garante que o WebSocket está aberto antes de enviar
+    if (websocket && websocket.readyState === WebSocket.OPEN) {
+        websocket.send(JSON.stringify({
+            type: 'answer',
+            answer: answer,
+            room: roomCode
+        }));
+    }
+}
+
+// FUNÇÃO AUXILIAR corrigida para iniciar conexão WebRTC
+async function initiateWebRTCConnection(roomCode) {
+    // Verificação DUPLA de estado
+    if (!websocket || websocket.readyState !== WebSocket.OPEN) {
+        console.warn('WebSocket não está aberto. Aguardando...');
+        return;
+    }
+    if (localPeerConnection.signalingState !== 'stable') {
+        console.warn('Conexão WebRTC não está estável. Estado:', localPeerConnection.signalingState);
+        return;
+    }
+    
+    console.log('🎯 Criando oferta WebRTC...');
+    const offer = await localPeerConnection.createOffer();
+    await localPeerConnection.setLocalDescription(offer);
+    
+    // ENVIA a oferta via WebSocket (que agora com certeza está aberto)
+    websocket.send(JSON.stringify({
+        type: 'offer',
+        offer: offer,
+        room: roomCode
+    }));
+    console.log('Oferta WebRTC enviada para a sala.');
+}
 
         function setupDataChannel(channel) {
             channel.onopen = () => {
